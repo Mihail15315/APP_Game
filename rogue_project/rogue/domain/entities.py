@@ -18,6 +18,13 @@ class TileType(Enum):
     DOOR = "+"
 
 
+class Visibility(Enum):
+    """Состояние клетки для тумана войны."""
+    UNKNOWN = 0    # никогда не видел — не рисуем
+    EXPLORED = 1   # видел, но сейчас не виден — рисуем только стены/пол
+    VISIBLE = 2    # виден сейчас — рисуем всё
+
+
 @dataclass(frozen=True)
 class Position:
     x: int
@@ -60,8 +67,6 @@ class ItemType(Enum):
 
 
 class ItemSubType(Enum):
-    """Подтип: для эликсиров/свитков указывает, какую характеристику менять;
-    для оружия — что это оружие; для еды/сокровищ — нет подтипа."""
     NONE = "—"
     AGILITY = "ловкость"
     STRENGTH = "сила"
@@ -71,24 +76,15 @@ class ItemSubType(Enum):
 
 @dataclass
 class Item:
-    """Игровой предмет.
-
-    Поля-«дельты» интерпретируются в зависимости от типа:
-      - еда: health восстанавливает здоровье;
-      - эликсир: временно +подтип (agility/strength/max_health), по истечении
-        восстанавливает прежние значения;
-      - свиток: постоянно +подтип;
-      - оружие: strength — модификатор урона;
-      - сокровище: cost — стоимость в таблицу рекордов.
-    """
+    """Игровой предмет."""
     item_type: ItemType
     sub_type: ItemSubType = ItemSubType.NONE
-    health: int = 0           # восстановление здоровья (еда)
-    max_health: int = 0       # +к макс. здоровью (эликсиры/свитки)
-    agility: int = 0          # +к ловкости
-    strength: int = 0         # +к силе (или урон оружия)
-    cost: int = 0             # стоимость (сокровище)
-    duration: int = 0         # длительность эффекта эликсира (в ходах)
+    health: int = 0
+    max_health: int = 0
+    agility: int = 0
+    strength: int = 0
+    cost: int = 0
+    duration: int = 0
     name: str = ""
 
     @property
@@ -105,7 +101,7 @@ class Item:
 # ====== Персонажи ======
 @dataclass
 class Character:
-    """Базовый персонаж (игрок и противники)."""
+    """Базовый персонаж."""
     pos: Position
     max_health: int
     health: int
@@ -120,18 +116,29 @@ class Character:
 
 
 @dataclass
+class PlayerStats:
+    """Накапливаемая статистика прохождения (по заданию 4)."""
+    treasures: int = 0
+    enemies_killed: int = 0
+    food_eaten: int = 0
+    potions_drunk: int = 0
+    scrolls_read: int = 0
+    hits_dealt: int = 0
+    hits_taken: int = 0
+    steps: int = 0
+
+
+@dataclass
 class Player(Character):
     """Игрок."""
     experience: int = 0
-    treasures: int = 0                 # суммарная стоимость собранных сокровищ
-    weapon: Item | None = None         # экипированное оружие
+    treasures: int = 0
+    weapon: Item | None = None
     backpack: list[Item] = field(default_factory=list)
-    # активные временные эффекты (эликсиры): список (end_turn, max_health_bonus,
-    # agility_bonus, strength_bonus, max_hp_total — на сколько подняли макс)
     effects: list[list] = field(default_factory=list)
-    # спец-состояния (от особых монстров)
-    sleeping: int = 0                  # ходов сна осталось
-    max_hp_drain: int = 0              # вампир уменьшил max_health
+    sleeping: int = 0
+    max_hp_drain: int = 0
+    stats: PlayerStats = field(default_factory=PlayerStats)
 
     @property
     def effective_strength(self) -> int:
@@ -154,7 +161,6 @@ class Player(Character):
 
 @dataclass
 class BackpackSlot:
-    """Учётная ячейка одного типа предметов (до 9 штук)."""
     item_type: ItemType
     items: list[Item] = field(default_factory=list)
 
@@ -165,19 +171,19 @@ class BackpackSlot:
 
 @dataclass
 class Room:
-    """Прямоугольная комната на карте."""
-    x: int          # левый верхний угол
+    x: int
     y: int
     width: int
     height: int
-    index: int = 0  # позиция в сетке 3×3 (0..8)
+    index: int = 0
+    is_start: bool = False
+    is_end: bool = False
 
     @property
     def center(self) -> Position:
         return Position(self.x + self.width // 2, self.y + self.height // 2)
 
     def random_floor(self, rng) -> Position:
-        import random
         return Position(
             rng.randint(self.x + 1, self.x + self.width - 2),
             rng.randint(self.y + 1, self.y + self.height - 2),
@@ -190,41 +196,40 @@ class Room:
 
 @dataclass
 class Corridor:
-    """Связь между двумя комнатами. Карвинг коридора делает генератор карты."""
-    a: int   # индекс комнаты
-    b: int   # индекс комнаты
+    """Связь между двумя комнатами + сохранённая геометрия клеток коридора."""
+    a: int
+    b: int
+    cells: list = field(default_factory=list)   # list[Position]
 
 
 @dataclass
 class Enemy(Character):
-    """Противник. type_name задаётся в enemies.py через фабрики."""
     type_name: str = ""
     display: str = "?"
-    color: int = 0          # индекс цвета curses (для view)
-    hostility: int = 0      # дистанция, с которой начинает преследовать
-    treasures: int = 0      # сокровищ выпадает при победе
-    # специфичные поля:
-    rest: int = 0           # огр отдыхает (1 ход после атаки)
-    guaranteed_hit_next: bool = False  # огр гарантированно бьёт после отдыха
-    first_strike_miss: bool = False    # вампир: первый удар игрока — промах
-    visible: bool = True    # привидение: периодически невидимо
-    pattern_dir: int = 0    # направление собственного паттерна
-    engaged: bool = False   # вступил в бой (для смены паттерна на преследование)
-    phase: int = 0          # фаза для периодических эффектов
+    color: int = 0
+    hostility: int = 0
+    treasures: int = 0
+    rest: int = 0
+    first_strike_miss: bool = False
+    visible: bool = True
+    pattern_dir: int = 0
+    engaged: bool = False
+    phase: int = 0
 
 
 @dataclass
 class Level:
-    """Уровень подземелья."""
-    index: int                       # 0-based: 0..20
-    map: "DungeonMap" = None         # type: ignore
+    index: int
+    map: "DungeonMap" = None  # type: ignore
     rooms: list[Room] = field(default_factory=list)
     corridors: list[Corridor] = field(default_factory=list)
     enemies: list[Enemy] = field(default_factory=list)
     items: list[Item] = field(default_factory=list)
-    item_positions: dict = field(default_factory=dict)  # (x,y) -> Item
+    item_positions: dict = field(default_factory=dict)
     start: Position = field(default_factory=lambda: Position(0, 0))
     stairs: Position = field(default_factory=lambda: Position(0, 0))
+    # туман войны: сетка видимости клеток
+    visibility: list = field(default_factory=list)
 
 
 @dataclass
@@ -242,7 +247,8 @@ class DungeonMap:
         return self.tiles[pos.y][pos.x]
 
     def is_walkable(self, pos: Position) -> bool:
-        return self.in_bounds(pos) and self.tile_at(pos) in (TileType.FLOOR, TileType.DOOR, TileType.STAIRS_DOWN)
+        return (self.in_bounds(pos)
+                and self.tile_at(pos) in (TileType.FLOOR, TileType.DOOR, TileType.STAIRS_DOWN))
 
     def set_tile(self, pos: Position, t: TileType) -> None:
         if self.in_bounds(pos):

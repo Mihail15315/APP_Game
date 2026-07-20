@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
 """Порт доступа к данным (Dependency Inversion).
 
-Определяется в ДОМЕНЕ, реализуется в слое data. Бизнес-логика зависит
-только от этой абстракции.
+Определяется в домене, реализуется в data. Домен ничего не знает о файлах.
 """
 from __future__ import annotations
 
@@ -19,9 +18,13 @@ class GameRepository(ABC):
         """Прочитать таблицу рекордов (отсортирована по сокровищам)."""
 
     @abstractmethod
-    def save_session(self, snapshot) -> None:
-        """Сохранить текущую сессию (опционально)."""
+    def save_session(self, data: dict) -> None:
+        """Сохранить полную игровую сессию для продолжения."""
 
     @abstractmethod
-    def load_session(self):
+    def load_session(self) -> dict | None:
         """Загрузить сохранённую сессию или None."""
+
+    @abstractmethod
+    def clear_session(self) -> None:
+        """Удалить сохранённую сессию (после провала/победы)."""

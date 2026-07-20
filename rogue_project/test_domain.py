@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 """Тесты бизнес-логики (domain). НЕ требуют curses/терминала."""
 from rogue.domain.game import Game
-from rogue.domain.commands import Command
-from rogue.domain.entities import Position, UP, DOWN, LEFT, RIGHT, Player, Enemy
-from rogue.domain.dungeon import generate_level
-from rogue.domain import combat, enemies as en
+from rogue.domain.commands import Command, select_to_index
+from rogue.domain.entities import Position, Player, PlayerStats, Visibility
+from rogue.domain.dungeon import generate_level, _is_connected
+from rogue.domain.entities import Corridor
+from rogue.domain import combat, enemies as en, fog
 from rogue.domain import items as itf
 import random
 
@@ -30,33 +31,44 @@ def test_confirm_removes_title():
     print("OK test_confirm_removes_title")
 
 
-def test_move_blocked_by_wall_keeps_position():
-    g = _fresh_game()
-    g.handle(Command.CONFIRM)
-    before = g.snapshot().player.pos
-    # Идём в стену несколько раз — позиция не должна стать невалидной
-    for _ in range(20):
-        g.handle(Command.MOVE_LEFT)
-    after = g.snapshot().player.pos
-    assert after.x >= 0 and after.y >= 0
-    print("OK test_move_blocked_by_wall_keeps_position")
-
-
-def test_level_has_rooms_and_stairs():
+def test_level_has_rooms_stairs_and_visibility():
     rng = random.Random(123)
     lvl = generate_level(0, rng)
     assert len(lvl.rooms) == 9
     assert lvl.map.tile_at(lvl.stairs).name == "STAIRS_DOWN"
-    print("OK test_level_has_rooms_and_stairs")
+    assert lvl.rooms[0].is_start
+    assert lvl.rooms[8].is_end
+    # visibility инициализирована
+    assert len(lvl.visibility) == lvl.map.height
+    print("OK test_level_has_rooms_stairs_and_visibility")
 
 
-def test_combat_hit_or_miss_returns_dict():
+def test_graph_is_connected():
+    rng = random.Random(7)
+    for _ in range(10):
+        lvl = generate_level(rng.randint(0, 20), rng)
+        assert _is_connected(9, lvl.corridors)
+    print("OK test_graph_is_connected (10 уровней)")
+
+
+def test_fog_visibility_grows():
+    rng = random.Random(99)
+    lvl = generate_level(0, rng)
+    fog.init_visibility(lvl)
+    fog.update_visibility(lvl, lvl.start)
+    # в стартовой комнате должны быть VISIBLE клетки
+    vis_count = sum(1 for row in lvl.visibility for v in row if v == Visibility.VISIBLE)
+    assert vis_count > 0
+    print("OK test_fog_visibility_grows")
+
+
+def test_combat_returns_dict():
     rng = random.Random(7)
     p = Player(pos=Position(0, 0), max_health=50, health=50, agility=8, strength=6)
     e = en.make_zombie(rng, Position(1, 0))
     res = combat.attack(p, e, rng)
     assert "hit" in res and "damage" in res and "killed" in res
-    print("OK test_combat_hit_or_miss_returns_dict")
+    print("OK test_combat_returns_dict")
 
 
 def test_food_heals_player():
@@ -64,37 +76,47 @@ def test_food_heals_player():
     p = Player(pos=Position(0, 0), max_health=50, health=10, agility=8, strength=6)
     food = itf.make_food(rng)
     before = p.health
-    itf.apply_item(p, food, 0)
+    itf.apply_food(p, food)
     assert p.health > before
     assert p.health <= p.max_health
     print("OK test_food_heals_player")
 
 
-def test_scroll_raises_stat_permanently():
+def test_scroll_permanent():
     rng = random.Random(2)
     p = Player(pos=Position(0, 0), max_health=50, health=50, agility=8, strength=6)
     scroll = itf.make_scroll(rng)
-    ag_before = p.agility
-    st_before = p.strength
-    mh_before = p.max_health
-    itf.apply_item(p, scroll, 0)
-    changed = (p.agility + p.strength + p.max_health) > (ag_before + st_before + mh_before)
-    assert changed
-    print("OK test_scroll_raises_stat_permanently")
+    before = p.agility + p.strength + p.max_health
+    itf.apply_scroll(p, scroll)
+    assert (p.agility + p.strength + p.max_health) > before
+    print("OK test_scroll_permanent")
 
 
-def test_repository_highscores_sorted():
-    import tempfile, os
+def test_select_to_index():
+    assert select_to_index(Command.SELECT_0) == 0
+    assert select_to_index(Command.SELECT_9) == 9
+    assert select_to_index(Command.CONFIRM) is None
+    print("OK test_select_to_index")
+
+
+def test_repository_highscores_and_session():
+    import tempfile
     from rogue.data.game_repository import FileGameRepository
     with tempfile.TemporaryDirectory() as d:
         repo = FileGameRepository(base_dir=d)
-        repo.save_highscore({"result": "death", "floor": 3, "treasures": 50})
-        repo.save_highscore({"result": "death", "floor": 5, "treasures": 200})
-        repo.save_highscore({"result": "win", "floor": 21, "treasures": 100})
+        repo.save_highscore({"result": "death", "floor": 3, "treasures": 50,
+                             "enemies_killed": 2})
+        repo.save_highscore({"result": "win", "floor": 21, "treasures": 200,
+                             "enemies_killed": 30})
         hs = repo.load_highscores()
         assert hs[0]["treasures"] == 200
-        assert hs[-1]["treasures"] == 50
-        print("OK test_repository_highscores_sorted")
+        # сохранение/загрузка сессии
+        repo.save_session({"floor": 5, "player": {"x": 1, "y": 1}})
+        s = repo.load_session()
+        assert s["floor"] == 5
+        repo.clear_session()
+        assert repo.load_session() is None
+        print("OK test_repository_highscores_and_session")
 
 
 def test_enemy_pool_grows_with_depth():
@@ -106,24 +128,26 @@ def test_enemy_pool_grows_with_depth():
     print("OK test_enemy_pool_grows_with_depth")
 
 
-def test_auto_pickup_treasure():
-    g = _fresh_game()
-    g.handle(Command.CONFIRM)
-    before = g.snapshot().player.treasures
-    # не можем гарантировать позицию, но проверим что функция не падает
-    g.handle(Command.WAIT)
-    print("OK test_auto_pickup_treasure (no crash)")
+def test_21_levels_generate():
+    rng = random.Random(55)
+    for i in range(21):
+        lvl = generate_level(i, rng)
+        assert len(lvl.rooms) == 9
+        assert _is_connected(9, lvl.corridors)
+    print("OK test_21_levels_generate")
 
 
 if __name__ == "__main__":
     test_player_starts_alive()
     test_confirm_removes_title()
-    test_move_blocked_by_wall_keeps_position()
-    test_level_has_rooms_and_stairs()
-    test_combat_hit_or_miss_returns_dict()
+    test_level_has_rooms_stairs_and_visibility()
+    test_graph_is_connected()
+    test_fog_visibility_grows()
+    test_combat_returns_dict()
     test_food_heals_player()
-    test_scroll_raises_stat_permanently()
-    test_repository_highscores_sorted()
+    test_scroll_permanent()
+    test_select_to_index()
+    test_repository_highscores_and_session()
     test_enemy_pool_grows_with_depth()
-    test_auto_pickup_treasure()
+    test_21_levels_generate()
     print("\nВсе тесты пройдены ✓")

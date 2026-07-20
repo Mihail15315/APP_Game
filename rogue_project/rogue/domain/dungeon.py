@@ -1,10 +1,12 @@
 # -*- coding: utf-8 -*-
 """Генератор подземелий.
 
-Каждый уровень: сетка 3×3 комнат, соединённых коридорами так, что граф
-комнат связен (из любой комнаты можно дойти в любую). Стартовая комната
-(индекс 0) пуста. В остальных могут быть противники и предметы. В одной из
-комнат — лестница (>) на следующий уровень.
+Каждый уровень: сетка 3×3 комнат (9 секций), соединённых коридорами.
+Граф комнат гарантированно связен (проверка после генерации). В каждой
+комнате случайные размер и положение. Коридоры хранят свою геометрию
+(координаты клеток), чтобы по ним тоже можно было ходить.
+
+Стартовая комната помечена is_start, в конечной (is_end) — лестница.
 """
 from __future__ import annotations
 
@@ -15,66 +17,96 @@ from rogue.domain.entities import (
 )
 from rogue.domain import enemies as en
 from rogue.domain import items as it
+from rogue.domain import fog
 
 
-# Размеры карты
-MAP_W, MAP_H = 80, 30
+MAP_W, MAP_H = 80, 40
 
-# Сетка комнат 3×3: позиции центров колонок/строк
-def _room_grid(rng):
-    """Размещает 9 комнат в сетке 3×3 со случайными размерами и промежутками."""
+# Сетка 3×3: границы секций (каждая ~26×13)
+_SECTION_W = MAP_W // 3
+_SECTION_H = MAP_H // 3
+
+
+def _section_origin(idx: int) -> tuple[int, int]:
+    """Вернуть (x0, y0) — левый верхний угол секции для комнаты idx (0..8)."""
+    r, c = divmod(idx, 3)
+    return c * _SECTION_W, r * _SECTION_H
+
+
+def _make_rooms(rng) -> list[Room]:
     rooms = []
-    # колонки: x-старты; строки: y-старты
-    col_x = [1, 28, 55]
-    row_y = [1, 11, 21]
-    idx = 0
-    for r in range(3):
-        for c in range(3):
-            w = rng.randint(7, 10)
-            h = rng.randint(4, 6)
-            x = col_x[c] + rng.randint(0, 2)
-            y = row_y[r] + rng.randint(0, 1)
-            rooms.append(Room(x=x, y=y, width=w, height=h, index=idx))
-            idx += 1
+    for idx in range(9):
+        sx, sy = _section_origin(idx)
+        w = rng.randint(7, 12)
+        h = rng.randint(5, 8)
+        # поместить комнату в пределах секции с отступом
+        max_dx = max(1, _SECTION_W - w - 2)
+        max_dy = max(1, _SECTION_H - h - 2)
+        x = sx + rng.randint(1, max_dx)
+        y = sy + rng.randint(1, max_dy)
+        rooms.append(Room(x=x, y=y, width=w, height=h, index=idx))
     return rooms
 
 
-def _connect(rng, rooms):
-    """Связать комнаты так, чтобы граф был связным. Сначала остовное дерево
-    по соседним комнатам, затем несколько случайных доп. рёбер."""
-    # соседние индексы в сетке 3×3
-    def neighbors(i):
-        r, c = divmod(i, 3)
-        res = []
-        if r > 0: res.append(i - 3)   # вверх
-        if r < 2: res.append(i + 3)   # вниз
-        if c > 0: res.append(i - 1)   # влево
-        if c < 2: res.append(i + 1)   # вправо
-        return res
+def _neighbors_in_grid(i: int) -> list[int]:
+    r, c = divmod(i, 3)
+    res = []
+    if r > 0: res.append(i - 3)
+    if r < 2: res.append(i + 3)
+    if c > 0: res.append(i - 1)
+    if c < 2: res.append(i + 1)
+    return res
 
-    visited = [False] * 9
-    corridors = []
-    # DFS-остов
+
+def _is_connected(rooms_count: int, corridors: list[Corridor]) -> bool:
+    """Проверка связности графа (BFS по неориентированным рёбрам)."""
+    adj = {i: set() for i in range(rooms_count)}
+    for c in corridors:
+        adj[c.a].add(c.b)
+        adj[c.b].add(c.a)
+    seen = {0}
     stack = [0]
+    while stack:
+        cur = stack.pop()
+        for n in adj[cur]:
+            if n not in seen:
+                seen.add(n)
+                stack.append(n)
+    return len(seen) == rooms_count
+
+
+def _connect(rng, rooms: list[Room]) -> list[Corridor]:
+    """Сгенерировать коридоры: остов (DFS) + доп. рёбра для циклов.
+    Гарантирует связность."""
+    corridors: list[Corridor] = []
+
+    def add_edge(i, j):
+        a, b = (i, j) if i < j else (j, i)
+        for c in corridors:
+            if c.a == a and c.b == b:
+                return
+        corridors.append(Corridor(a=a, b=b))
+
+    visited = [False] * len(rooms)
     visited[0] = True
+    stack = [0]
     while stack:
         cur = stack[-1]
-        nbs = [n for n in neighbors(cur) if not visited[n]]
+        nbs = [n for n in _neighbors_in_grid(cur) if not visited[n]]
         if not nbs:
             stack.pop()
             continue
         nxt = rng.choice(nbs)
-        corridors.append(Corridor(min(cur, nxt), max(cur, nxt)))
+        add_edge(cur, nxt)
         visited[nxt] = True
         stack.append(nxt)
-    # доп. связи для кольцевости (чтобы не было тупиковых деревьев)
-    for _ in range(3):
-        i, j = rng.sample(range(9), 2)
-        if j in neighbors(i):
-            corridors.append(Corridor(min(i, j), max(i, j)))
-    # убрать дубли
-    uniq = {(c.a, c.b): c for c in corridors}
-    return list(uniq.values())
+    # доп. рёбра для колец (3-5 штук)
+    for _ in range(rng.randint(3, 5)):
+        i, j = rng.sample(range(len(rooms)), 2)
+        if j in _neighbors_in_grid(i):
+            add_edge(i, j)
+    assert _is_connected(len(rooms), corridors), "граф комнат несвязен"
+    return corridors
 
 
 def _carve_room(tiles, room: Room):
@@ -84,26 +116,26 @@ def _carve_room(tiles, room: Room):
                 tiles[y][x] = TileType.FLOOR
 
 
-def _carve_corridor(tiles, a: Room, b: Room, rng):
-    """L-образный коридор между центрами двух комнат."""
+def _carve_corridor(tiles, a: Room, b: Room, rng) -> list[Position]:
+    """L-образный коридор. Возвращает список вырезанных клеток."""
     ax, ay = a.center.x, a.center.y
     bx, by = b.center.x, b.center.y
-    path = []
+    cells = []
     if rng.random() < 0.5:
-        # сначала по X, потом по Y
         for x in range(min(ax, bx), max(ax, bx) + 1):
-            path.append((x, ay))
+            cells.append(Position(x, ay))
         for y in range(min(ay, by), max(ay, by) + 1):
-            path.append((bx, y))
+            cells.append(Position(bx, y))
     else:
         for y in range(min(ay, by), max(ay, by) + 1):
-            path.append((ax, y))
+            cells.append(Position(ax, y))
         for x in range(min(ax, bx), max(ax, bx) + 1):
-            path.append((x, by))
-    for x, y in path:
-        if 0 <= y < MAP_H and 0 <= x < MAP_W:
-            if tiles[y][x] == TileType.WALL:
-                tiles[y][x] = TileType.FLOOR
+            cells.append(Position(x, by))
+    for p in cells:
+        if 0 <= p.y < MAP_H and 0 <= p.x < MAP_W:
+            if tiles[p.y][p.x] == TileType.WALL:
+                tiles[p.y][p.x] = TileType.FLOOR
+    return cells
 
 
 def _empty_map():
@@ -111,66 +143,59 @@ def _empty_map():
 
 
 def generate_level(index: int, rng) -> Level:
-    """Сгенерировать уровень по индексу (0..20)."""
-    rooms = _room_grid(rng)
+    rooms = _make_rooms(rng)
     corridors = _connect(rng, rooms)
     tiles = _empty_map()
     for room in rooms:
         _carve_room(tiles, room)
     for c in corridors:
-        _carve_corridor(tiles, rooms[c.a], rooms[c.b], rng)
+        c.cells = _carve_corridor(tiles, rooms[c.a], rooms[c.b], rng)
 
     dmap = DungeonMap(width=MAP_W, height=MAP_H, tiles=tiles)
+    # стартовая — комната 0, конечная — самая «дальняя» (другой конец сетки)
+    rooms[0].is_start = True
+    rooms[8].is_end = True
     level = Level(index=index, map=dmap, rooms=rooms, corridors=corridors)
 
-    # Стартовая комната = 0
-    start_room = rooms[0]
-    level.start = start_room.random_floor(rng)
-
-    # Лестница в случайной дальней комнате (не в стартовой)
-    stairs_room = rng.choice(rooms[1:])
-    level.stairs = stairs_room.random_floor(rng)
+    level.start = rooms[0].random_floor(rng)
+    level.stairs = rooms[8].random_floor(rng)
     dmap.set_tile(level.stairs, TileType.STAIRS_DOWN)
 
-    # Заполнение остальных комнат
     _populate(level, rng, index)
-
+    fog.init_visibility(level)
     return level
 
 
 def _populate(level: Level, rng, depth: int):
-    """Разместить противников и предметы по комнатам (кроме стартовой)."""
-    # Количество противников растёт с глубиной
-    n_enemies = min(3 + depth // 2, 12)
-    # Предметов становится меньше с глубиной
-    n_items = max(1, 4 - depth // 5)
+    n_enemies = min(2 + depth // 2, 10)
+    n_items = max(1, 4 - depth // 6)
     pool = en.pool_for_depth(depth)
 
     occupied = {level.start, level.stairs}
+    # стартовая комната пуста; остальные — заполняем
     for room in level.rooms[1:]:
-        # 1-2 противника на комнату
         for _ in range(rng.randint(0, 2)):
             if n_enemies <= 0:
                 break
-            pos = room.random_floor(rng)
-            tries = 0
-            while pos in occupied and tries < 10:
-                pos = room.random_floor(rng)
-                tries += 1
-            occupied.add(pos)
+            pos = _free_cell(room, rng, occupied)
+            if pos is None:
+                continue
             tname = rng.choice(pool)
-            e = en.make_enemy(tname, rng, pos)
-            level.enemies.append(e)
+            level.enemies.append(en.make_enemy(tname, rng, pos))
             n_enemies -= 1
-        # 0-1 предмет на комнату
         if n_items > 0 and rng.random() < 0.6:
-            pos = room.random_floor(rng)
-            tries = 0
-            while pos in occupied and tries < 10:
-                pos = room.random_floor(rng)
-                tries += 1
-            occupied.add(pos)
-            item = it.make_random(rng, depth)
-            level.items.append(item)
-            level.item_positions[(pos.x, pos.y)] = item
-            n_items -= 1
+            pos = _free_cell(room, rng, occupied)
+            if pos is not None:
+                item = it.make_random(rng, depth)
+                level.items.append(item)
+                level.item_positions[(pos.x, pos.y)] = item
+                n_items -= 1
+
+
+def _free_cell(room: Room, rng, occupied) -> Position | None:
+    for _ in range(20):
+        p = room.random_floor(rng)
+        if p not in occupied:
+            occupied.add(p)
+            return p
+    return None

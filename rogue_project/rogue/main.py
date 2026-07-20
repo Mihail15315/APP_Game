@@ -34,7 +34,6 @@ def _init_colors() -> None:
         curses.init_pair(C_FLOOR, curses.COLOR_WHITE, bg)
         curses.init_pair(C_STAIRS, curses.COLOR_MAGENTA, bg)
         curses.init_pair(C_ITEM, curses.COLOR_BLUE, bg)
-        # монстры по спецификации:
         curses.init_pair(C_ZOMBIE, curses.COLOR_GREEN, bg)
         curses.init_pair(C_VAMPIRE, curses.COLOR_RED, bg)
         curses.init_pair(C_GHOST, curses.COLOR_WHITE, bg)
