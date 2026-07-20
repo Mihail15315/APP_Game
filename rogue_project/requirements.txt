@@ -1,0 +1,6 @@
+# Rogue — зависимости.
+# Стандартная библиотека Python 3.10 (curses) входит в дистрибутив.
+# На Windows curses отсутствует — см. блок ниже.
+
+# Для запуска тестов на Windows (опционально):
+windows-curses; platform_system == "Windows"
