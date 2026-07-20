@@ -1,0 +1,24 @@
+# Кэш Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Виртуальные окружения
+.venv/
+venv/
+ENV/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Локальные конфиги
+.env
+.DS_Store
+Thumbs.db
